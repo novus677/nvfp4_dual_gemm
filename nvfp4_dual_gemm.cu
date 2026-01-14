@@ -18,6 +18,11 @@ __device__ __forceinline__ float silu(float x) {
   return x * (1.0f / (1.0f + __expf(-x)));
 }
 
+__device__ __forceinline__ float silu_fast(float x) {
+  float y = 0.5 * x;
+  return fmaf(y, __tanhf(y), y);
+}
+
 __device__ __forceinline__ void sync_wg(int wg_id) {
   asm volatile("bar.sync %0, 128;\n" ::"r"(wg_id + 1) : "memory");
 }
@@ -34,10 +39,10 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
   return pred;
 }
 
-template <int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K, int32_t PIPE_DEPTH>
+template <int32_t K, int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K,
+          int32_t PIPE_DEPTH, bool FAST_SILU>
 __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
-    nvfp4_dual_gemm(int M, int N, int K,
-                    __grid_constant__ const CUtensorMap a_map,
+    nvfp4_dual_gemm(int M, int N, __grid_constant__ const CUtensorMap a_map,
                     __grid_constant__ const CUtensorMap b1_map,
                     __grid_constant__ const CUtensorMap b2_map,
                     uint8_t *SFA_ptr, uint8_t *SFB1_ptr, uint8_t *SFB2_ptr,
@@ -104,10 +109,12 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
         const int32_t row = warp_id * 32 + r * 16 + lane_id / 4;
         const int32_t col = (lane_id % 4) * 2 + 2 * i;
 
-        float val1 = silu(acc1[i]) * acc2[i];
-        float val2 = silu(acc1[i + 1]) * acc2[i + 1];
-        float val3 = silu(acc1[i + 2]) * acc2[i + 2];
-        float val4 = silu(acc1[i + 3]) * acc2[i + 3];
+        constexpr auto silu_func = FAST_SILU ? silu_fast : silu;
+
+        float val1 = silu_func(acc1[i]) * acc2[i];
+        float val2 = silu_func(acc1[i + 1]) * acc2[i + 1];
+        float val3 = silu_func(acc1[i + 2]) * acc2[i + 2];
+        float val4 = silu_func(acc1[i + 3]) * acc2[i + 3];
 
         __stwt(reinterpret_cast<half2 *>(&c_off[row * N + col]),
                __float22half2_rn(make_float2(val1, val2)));
@@ -241,9 +248,10 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
   }
 }
 
-template <int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K, int32_t PIPE_DEPTH>
-void launch_nvfp4_dual_gemm(int M, int N, int K, uint8_t *A_ptr,
-                            uint8_t *B1_ptr, uint8_t *B2_ptr, uint8_t *SFA_ptr,
+template <int32_t K, int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K,
+          int32_t PIPE_DEPTH, bool FAST_SILU>
+void launch_nvfp4_dual_gemm(int M, int N, uint8_t *A_ptr, uint8_t *B1_ptr,
+                            uint8_t *B2_ptr, uint8_t *SFA_ptr,
                             uint8_t *SFB1_ptr, uint8_t *SFB2_ptr,
                             uint8_t *C_ptr) {
   CUtensorMap tensorMapA;
@@ -283,21 +291,21 @@ void launch_nvfp4_dual_gemm(int M, int N, int K, uint8_t *A_ptr,
       shmem_size_a + 2 * shmem_size_b + shmem_size_sfa + 2 * shmem_size_sfb;
   static_assert(shmem_size <= 227 * 1024, "Shared memory size exceeds 227 KB");
   CUDA_CHECK(cudaFuncSetAttribute(
-      nvfp4_dual_gemm<BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH>,
+      nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
   const int32_t num_rows = CEIL_DIV(M, BLOCK_M);
   const int32_t num_cols = CEIL_DIV(N, BLOCK_N);
 
-  nvfp4_dual_gemm<BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH>
+  nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU>
       <<<num_rows * num_cols, BLOCK_DIM, shmem_size>>>(
-          M, N, K, tensorMapA, tensorMapB1, tensorMapB2, SFA_ptr, SFB1_ptr,
+          M, N, tensorMapA, tensorMapB1, tensorMapB2, SFA_ptr, SFB1_ptr,
           SFB2_ptr, C_ptr);
 }
 
-#define LAUNCH(BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH)                          \
-  launch_nvfp4_dual_gemm<BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH>(               \
-      M, N, K, A_ptr, B1_ptr, B2_ptr, SFA_ptr, SFB1_ptr, SFB2_ptr, C_ptr)
+#define LAUNCH(K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU)            \
+  launch_nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU>( \
+      M, N, A_ptr, B1_ptr, B2_ptr, SFA_ptr, SFB1_ptr, SFB2_ptr, C_ptr)
 
 torch::Tensor
 cuda_nvfp4_dual_gemm(const torch::Tensor &A, const torch::Tensor &B1,
@@ -320,15 +328,50 @@ cuda_nvfp4_dual_gemm(const torch::Tensor &A, const torch::Tensor &B1,
   uint8_t *SFB2_ptr = reinterpret_cast<uint8_t *>(SFB2.data_ptr());
   uint8_t *C_ptr = reinterpret_cast<uint8_t *>(C.data_ptr());
 
-  switch (M) {
-  case 256:
-    LAUNCH(128, 64, 256, 5);
+  auto hash = [](int x, int y, int z) -> uint64_t {
+    return static_cast<uint64_t>(x) << 32 | static_cast<uint64_t>(y) << 16 |
+           static_cast<uint64_t>(z);
+  };
+
+  switch (hash(M, N, K)) {
+  [[likely]] case hash(256, 4096, 7168):
+    LAUNCH(7168, 128, 64, 256, 5, true);
     break;
-  case 512:
-    LAUNCH(128, 128, 256, 4);
+  [[likely]] case hash(512, 4096, 7168):
+    LAUNCH(7168, 128, 128, 256, 4, false);
     break;
-  default:
-    LAUNCH(128, 128, 256, 4);
+  [[likely]] case hash(256, 3072, 4096):
+    LAUNCH(4096, 128, 64, 256, 5, true);
+    break;
+  [[likely]] case hash(512, 3072, 7168):
+    LAUNCH(7168, 128, 128, 256, 4, true);
+    break;
+  [[unlikely]] case hash(1536, 512, 7168):
+    LAUNCH(7168, 128, 128, 256, 4, false);
+    break;
+  [[unlikely]] case hash(256, 512, 256):
+    LAUNCH(256, 128, 128, 256, 4, false);
+    break;
+  [[unlikely]] case hash(3072, 1024, 1536):
+    LAUNCH(1536, 128, 128, 256, 4, false);
+    break;
+  [[unlikely]] case hash(7168, 1024, 256):
+    LAUNCH(256, 128, 128, 256, 4, false);
+    break;
+  [[unlikely]] case hash(7168, 2304, 2048):
+    LAUNCH(2048, 128, 128, 256, 4, false);
+    break;
+  [[unlikely]] case hash(4608, 384, 7168):
+    LAUNCH(7168, 128, 128, 256, 4, false);
+    break;
+  [[unlikely]] case hash(7168, 384, 2304):
+    LAUNCH(2304, 128, 128, 256, 4, false);
+    break;
+  [[unlikely]] case hash(512, 768, 7168):
+    LAUNCH(7168, 128, 128, 256, 4, false);
+    break;
+  [[unlikely]] case hash(4096, 768, 512):
+    LAUNCH(512, 128, 128, 256, 4, false);
     break;
   }
 
