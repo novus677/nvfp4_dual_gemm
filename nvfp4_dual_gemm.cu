@@ -214,20 +214,20 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
         const uint32_t sfb_offset = (BLOCK_N == 64) ? (outer_col % 2) * 2 : 0;
         for (int32_t j = 0; j < 4; j++) {
           if (j == 0 && k == 0) {
-            tcgen05_mma<0, inst_desc>(
+            tcgen05_mma<0, inst_desc, CollectorUsage::FILL>(
                 desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
                 tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
                 tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-            tcgen05_mma<0, inst_desc>(
+            tcgen05_mma<0, inst_desc, CollectorUsage::LASTUSE>(
                 desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
                 tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
                 tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
           } else {
-            tcgen05_mma<1, inst_desc>(
+            tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
                 desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
                 tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
                 tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-            tcgen05_mma<1, inst_desc>(
+            tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
                 desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
                 tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
                 tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
@@ -320,7 +320,17 @@ cuda_nvfp4_dual_gemm(const torch::Tensor &A, const torch::Tensor &B1,
   uint8_t *SFB2_ptr = reinterpret_cast<uint8_t *>(SFB2.data_ptr());
   uint8_t *C_ptr = reinterpret_cast<uint8_t *>(C.data_ptr());
 
-  LAUNCH(128, 64, 256, 1);
+  switch (M) {
+  case 256:
+    LAUNCH(128, 64, 256, 5);
+    break;
+  case 512:
+    LAUNCH(128, 128, 256, 4);
+    break;
+  default:
+    LAUNCH(128, 128, 256, 4);
+    break;
+  }
 
   return C;
 }

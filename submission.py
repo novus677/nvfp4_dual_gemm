@@ -4,6 +4,13 @@ import torch
 from task import input_t, output_t
 from torch.utils.cpp_extension import load_inline
 
+import sys
+
+if sys.stdout is None:
+    sys.stdout = open("/dev/stdout", "w")
+if sys.stderr is None:
+    sys.stderr = open("/dev/stdout", "w")
+
 CPP_SRC = r"""
 #include <torch/extension.h>
 
@@ -604,16 +611,24 @@ CUDA_HEADERS = [
     // tcgen05 Intrinsic Calls
     ////////////////////////////////////////////////////////////////////////////////
 
-    template <int ScaleD, uint32_t InstDesc>
+    struct CollectorUsage {
+    static constexpr char FILL[] = "fill";
+    static constexpr char USE[] = "use";
+    static constexpr char LASTUSE[] = "lastuse";
+    static constexpr char DISCARD[] = "discard";
+    };
+
+    template <int ScaleD, uint32_t InstDesc, const char *CollectorOp>
     __device__ void tcgen05_mma(uint64_t desc_a, uint64_t desc_b, uint32_t tmem_d,
                                 uint32_t tmem_sfa, uint32_t tmem_sfb) {
-    asm volatile("{\n"
-                "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::"
-                "4X [%0], %1, %2, %3, [%4], [%5], %6;\n"
-                "}\n"
-                :
-                : "r"(tmem_d), "l"(desc_a), "l"(desc_b), "r"(InstDesc),
-                    "r"(tmem_sfa), "r"(tmem_sfb), "n"(int32_t(ScaleD)));
+    asm volatile(
+        "{\n"
+        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::"
+        "4X.collector::a::%7 [%0], %1, %2, %3, [%4], [%5], %6;\n"
+        "}\n"
+        :
+        : "r"(tmem_d), "l"(desc_a), "l"(desc_b), "r"(InstDesc), "r"(tmem_sfa),
+            "r"(tmem_sfb), "n"(int32_t(ScaleD)), "C"(CollectorOp));
     }
     """,
 ]
@@ -832,20 +847,20 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
         const uint32_t sfb_offset = (BLOCK_N == 64) ? (outer_col % 2) * 2 : 0;
         for (int32_t j = 0; j < 4; j++) {
           if (j == 0 && k == 0) {
-            tcgen05_mma<0, inst_desc>(
+            tcgen05_mma<0, inst_desc, CollectorUsage::FILL>(
                 desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
                 tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
                 tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-            tcgen05_mma<0, inst_desc>(
+            tcgen05_mma<0, inst_desc, CollectorUsage::LASTUSE>(
                 desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
                 tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
                 tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
           } else {
-            tcgen05_mma<1, inst_desc>(
+            tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
                 desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
                 tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
                 tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-            tcgen05_mma<1, inst_desc>(
+            tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
                 desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
                 tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
                 tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
@@ -938,7 +953,17 @@ cuda_nvfp4_dual_gemm(const torch::Tensor &A, const torch::Tensor &B1,
   uint8_t *SFB2_ptr = reinterpret_cast<uint8_t *>(SFB2.data_ptr());
   uint8_t *C_ptr = reinterpret_cast<uint8_t *>(C.data_ptr());
 
-  LAUNCH(128, 64, 256, 4);
+  switch (M) {
+  case 256:
+    LAUNCH(128, 64, 256, 5);
+    break;
+  case 512:
+    LAUNCH(128, 128, 256, 4);
+    break;
+  default:
+    LAUNCH(128, 128, 256, 4);
+    break;
+  }
 
   return C;
 }

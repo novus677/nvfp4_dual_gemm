@@ -335,14 +335,22 @@ __device__ constexpr uint32_t make_inst_desc() {
 // tcgen05 Intrinsic Calls
 ////////////////////////////////////////////////////////////////////////////////
 
-template <int ScaleD, uint32_t InstDesc>
+struct CollectorUsage {
+  static constexpr char FILL[] = "fill";
+  static constexpr char USE[] = "use";
+  static constexpr char LASTUSE[] = "lastuse";
+  static constexpr char DISCARD[] = "discard";
+};
+
+template <int ScaleD, uint32_t InstDesc, const char *CollectorOp>
 __device__ void tcgen05_mma(uint64_t desc_a, uint64_t desc_b, uint32_t tmem_d,
                             uint32_t tmem_sfa, uint32_t tmem_sfb) {
   asm volatile("{\n"
                "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::"
-               "4X [%0], %1, %2, %3, [%4], [%5], %6;\n"
+               "4X.collector::a::%7 [%0], %1, %2, %3, [%4], [%5], %6;\n"
                "}\n"
                :
                : "r"(tmem_d), "l"(desc_a), "l"(desc_b), "r"(InstDesc),
-                 "r"(tmem_sfa), "r"(tmem_sfb), "n"(int32_t(ScaleD)));
+                 "r"(tmem_sfa), "r"(tmem_sfb), "n"(int32_t(ScaleD)),
+                 "C"(CollectorOp));
 }
