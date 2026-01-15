@@ -90,54 +90,60 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
     const uint32_t tmem_d2 = tmem_d1 + BLOCK_N;
     constexpr auto silu_func = FAST_SILU ? silu_fast : silu;
 
-    float acc1[BLOCK_N / 2];
-    float acc2[BLOCK_N / 2];
+    float acc1[BLOCK_N / 4];
+    float acc2[BLOCK_N / 4];
 
     wait(&final_matmul_done[0], 0);
 
     if constexpr (TRANSPOSE) {
       half *c_off = C_ptr + (outer_col * BLOCK_N) * M + (outer_row * BLOCK_M);
-      for (int32_t r = 0; r < 2; r++) {
+      for (int32_t r = 0; r < 4; r++) {
         if constexpr (BLOCK_N == 128) {
-          tcgen05_ld_32x32b_x64(tmem_d1 + r * (BLOCK_N / 2), acc1);
-          tcgen05_ld_32x32b_x64(tmem_d2 + r * (BLOCK_N / 2), acc2);
+          tcgen05_ld_32x32b_x32(tmem_d1 + r * (BLOCK_N / 4), acc1);
+          tcgen05_ld_32x32b_x32(tmem_d2 + r * (BLOCK_N / 4), acc2);
         } else if constexpr (BLOCK_N == 64) {
-          tcgen05_ld_32x32b_x32(tmem_d1 + r * (BLOCK_N / 2), acc1);
-          tcgen05_ld_32x32b_x32(tmem_d2 + r * (BLOCK_N / 2), acc2);
+          tcgen05_ld_32x32b_x16(tmem_d1 + r * (BLOCK_N / 4), acc1);
+          tcgen05_ld_32x32b_x16(tmem_d2 + r * (BLOCK_N / 4), acc2);
         }
         tcgen05_wait_ld();
 
-        for (int32_t i = 0; i < (BLOCK_N / 2); i++) {
+        for (int32_t i = 0; i < (BLOCK_N / 4); i++) {
           float val = silu_func(acc1[i]) * acc2[i];
-          __stwt(&c_off[(r * (BLOCK_N / 2) + i) * M + wg_lane_id],
+          __stwt(&c_off[(r * (BLOCK_N / 4) + i) * M + wg_lane_id],
                  __float2half_rn(val));
         }
       }
     } else {
       half *c_off = C_ptr + (outer_row * BLOCK_M) * N + (outer_col * BLOCK_N);
-      for (int32_t r = 0; r < 2; r++) {
-        if constexpr (BLOCK_N == 128) {
-          tcgen05_ld_16x256b_x16(tmem_d1 + r * (16 << 16), acc1);
-          tcgen05_ld_16x256b_x16(tmem_d2 + r * (16 << 16), acc2);
-        } else if constexpr (BLOCK_N == 64) {
-          tcgen05_ld_16x256b_x8(tmem_d1 + r * (16 << 16), acc1);
-          tcgen05_ld_16x256b_x8(tmem_d2 + r * (16 << 16), acc2);
-        }
-        tcgen05_wait_ld();
+      for (int32_t r0 = 0; r0 < 2; r0++) {
+        for (int32_t r1 = 0; r1 < 2; r1++) {
+          if constexpr (BLOCK_N == 128) {
+            tcgen05_ld_16x256b_x8(
+                tmem_d1 + r0 * (BLOCK_N / 2) + r1 * (16 << 16), acc1);
+            tcgen05_ld_16x256b_x8(
+                tmem_d2 + r0 * (BLOCK_N / 2) + r1 * (16 << 16), acc2);
+          } else if constexpr (BLOCK_N == 64) {
+            tcgen05_ld_16x256b_x4(
+                tmem_d1 + r0 * (BLOCK_N / 2) + r1 * (16 << 16), acc1);
+            tcgen05_ld_16x256b_x4(
+                tmem_d2 + r0 * (BLOCK_N / 2) + r1 * (16 << 16), acc2);
+          }
+          tcgen05_wait_ld();
 
-        for (int32_t i = 0; i < (BLOCK_N / 2); i += 4) {
-          const int32_t row = warp_id * 32 + r * 16 + lane_id / 4;
-          const int32_t col = (lane_id % 4) * 2 + 2 * i;
+          for (int32_t i = 0; i < (BLOCK_N / 4); i += 4) {
+            const int32_t row = warp_id * 32 + r1 * 16 + lane_id / 4;
+            const int32_t col = r0 * (BLOCK_N / 2) + (lane_id % 4) * 2 + 2 * i;
 
-          float val1 = silu_func(acc1[i]) * acc2[i];
-          float val2 = silu_func(acc1[i + 1]) * acc2[i + 1];
-          float val3 = silu_func(acc1[i + 2]) * acc2[i + 2];
-          float val4 = silu_func(acc1[i + 3]) * acc2[i + 3];
+            float val1 = silu_func(acc1[i]) * acc2[i];
+            float val2 = silu_func(acc1[i + 1]) * acc2[i + 1];
+            float val3 = silu_func(acc1[i + 2]) * acc2[i + 2];
+            float val4 = silu_func(acc1[i + 3]) * acc2[i + 3];
 
-          __stwt(reinterpret_cast<half2 *>(&c_off[row * N + col]),
-                 __float22half2_rn(make_float2(val1, val2)));
-          __stwt(reinterpret_cast<half2 *>(&c_off[(row + 8) * N + col]),
-                 __float22half2_rn(make_float2(val3, val4)));
+            __stwt(reinterpret_cast<half2 *>(&c_off[row * N + col]),
+                   __float22half2_rn(make_float2(val1, val2)));
+            __stwt(reinterpret_cast<half2 *>(&c_off[(row + 8) * N + col]),
+                   __float22half2_rn(make_float2(val3, val4)));
+          }
         }
       }
     }
@@ -312,7 +318,7 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
 }
 
 template <int32_t K, int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K,
-          int32_t PIPE_DEPTH, bool FAST_SILU, bool TRANSPOSE>
+          int32_t PIPE_DEPTH, bool FAST_SILU, bool TRANSPOSE, int32_t GRID_DIM>
 void launch_nvfp4_dual_gemm(int M, int N, uint8_t *A_ptr, uint8_t *B1_ptr,
                             uint8_t *B2_ptr, uint8_t *SFA_ptr,
                             uint8_t *SFB1_ptr, uint8_t *SFB2_ptr, half *C_ptr) {
@@ -357,19 +363,20 @@ void launch_nvfp4_dual_gemm(int M, int N, uint8_t *A_ptr, uint8_t *B1_ptr,
                                        FAST_SILU, TRANSPOSE>,
                        cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
 
-  const int32_t num_rows = CEIL_DIV(M, BLOCK_M);
-  const int32_t num_cols = CEIL_DIV(N, BLOCK_N);
+  // const int32_t num_rows = CEIL_DIV(M, BLOCK_M);
+  // const int32_t num_cols = CEIL_DIV(N, BLOCK_N);
 
   nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,
-                  TRANSPOSE><<<num_rows * num_cols, BLOCK_DIM, shmem_size>>>(
+                  TRANSPOSE><<<GRID_DIM, BLOCK_DIM, shmem_size>>>(
       M, N, tensorMapA, tensorMapB1, tensorMapB2, SFA_ptr, SFB1_ptr, SFB2_ptr,
       C_ptr);
 }
 
-#define LAUNCH(K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU, TRANSPOSE) \
+#define LAUNCH(K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU, TRANSPOSE, \
+               GRID_DIM)                                                       \
   launch_nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,  \
-                         TRANSPOSE>(M, N, A_ptr, B1_ptr, B2_ptr, SFA_ptr,      \
-                                    SFB1_ptr, SFB2_ptr, C_ptr)
+                         TRANSPOSE, GRID_DIM>(                                 \
+      M, N, A_ptr, B1_ptr, B2_ptr, SFA_ptr, SFB1_ptr, SFB2_ptr, C_ptr)
 
 torch::Tensor
 cuda_nvfp4_dual_gemm(const torch::Tensor &A, const torch::Tensor &B1,
@@ -395,43 +402,43 @@ cuda_nvfp4_dual_gemm(const torch::Tensor &A, const torch::Tensor &B1,
 
   switch (hash(M, N, K)) {
   [[likely]] case hash(256, 4096, 7168):
-    LAUNCH(7168, 128, 64, 256, 5, true, false);
+    LAUNCH(7168, 128, 64, 256, 5, true, false, 128);
     return C;
   [[likely]] case hash(512, 4096, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, 128);
     return C;
   [[likely]] case hash(256, 3072, 4096):
-    LAUNCH(4096, 128, 64, 256, 5, true, false);
+    LAUNCH(4096, 128, 64, 256, 5, true, false, 96);
     return C;
   [[likely]] case hash(512, 3072, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, true, true);
+    LAUNCH(7168, 128, 128, 256, 4, true, true, 96);
     return C.view({N, M, 1}).transpose(0, 1);
   [[unlikely]] case hash(1536, 512, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, 48);
     return C;
   [[unlikely]] case hash(256, 512, 256):
-    LAUNCH(256, 128, 128, 256, 4, false, false);
+    LAUNCH(256, 128, 128, 256, 4, false, false, 8);
     return C;
   [[unlikely]] case hash(3072, 1024, 1536):
-    LAUNCH(1536, 128, 128, 256, 4, false, false);
+    LAUNCH(1536, 128, 128, 256, 4, false, false, 192);
     return C;
   [[unlikely]] case hash(7168, 1024, 256):
-    LAUNCH(256, 128, 128, 256, 4, false, false);
+    LAUNCH(256, 128, 128, 256, 4, false, false, 448);
     return C;
   [[unlikely]] case hash(7168, 2304, 2048):
-    LAUNCH(2048, 128, 128, 256, 4, false, false);
+    LAUNCH(2048, 128, 128, 256, 4, false, false, 1008);
     return C;
   [[unlikely]] case hash(4608, 384, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, 108);
     return C;
   [[unlikely]] case hash(7168, 384, 2304):
-    LAUNCH(2304, 128, 128, 256, 4, false, false);
+    LAUNCH(2304, 128, 128, 256, 4, false, false, 168);
     return C;
   [[unlikely]] case hash(512, 768, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, 24);
     return C;
   [[unlikely]] case hash(4096, 768, 512):
-    LAUNCH(512, 128, 128, 256, 4, false, false);
+    LAUNCH(512, 128, 128, 256, 4, false, false, 192);
     return C;
   [[unlikely]] default:
     return C;
