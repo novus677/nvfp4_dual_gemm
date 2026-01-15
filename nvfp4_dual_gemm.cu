@@ -216,9 +216,12 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
       constexpr uint32_t inst_desc =
           make_inst_desc<BLOCK_M, BLOCK_N, UMMA_K, 0, 0>();
 
+      const uint32_t sfa_offset = (BLOCK_M == 64) ? (outer_row % 2) * 2 : 0;
+      const uint32_t sfb_offset = (BLOCK_N == 64) ? (outer_col % 2) * 2 : 0;
+
       int32_t pipe_idx;
       uint32_t phase;
-      for (int32_t k = 0; k < (K / BLOCK_K); k++) {
+      for (int32_t k = 0; k < 1; k++) {
         pipe_idx = k % PIPE_DEPTH;
         phase = (k / PIPE_DEPTH) % 2;
 
@@ -239,34 +242,69 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
             make_smem_desc<NO_SWIZZLE>(sfb2_shr, 128, 128);
 
         wait(&tma_done[pipe_idx], phase);
+
+        tcgen05_cp(desc_sfa, tmem_sfa);
+        tcgen05_cp(desc_sfb1, tmem_sfb1);
+        tcgen05_cp(desc_sfb2, tmem_sfb2);
+
+        tcgen05_mma<0, inst_desc, CollectorUsage::FILL>(
+            desc_a, desc_b1, tmem_d1, tmem_sfa + sfa_offset,
+            tmem_sfb1 + sfb_offset);
+        tcgen05_mma<0, inst_desc, CollectorUsage::LASTUSE>(
+            desc_a, desc_b2, tmem_d2, tmem_sfa + sfa_offset,
+            tmem_sfb2 + sfb_offset);
+
+        for (int32_t j = 1; j < 4; j++) {
+          tcgen05_cp(desc_sfa + j * 32, tmem_sfa + j * 4);
+          tcgen05_cp(desc_sfb1 + j * 32, tmem_sfb1 + j * 4);
+          tcgen05_cp(desc_sfb2 + j * 32, tmem_sfb2 + j * 4);
+
+          tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
+              desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
+              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+              tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+          tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
+              desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
+              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+              tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+        }
+        tcgen05_commit(&matmul_done[pipe_idx]);
+      }
+      for (int32_t k = 1; k < (K / BLOCK_K); k++) {
+        pipe_idx = k % PIPE_DEPTH;
+        phase = (k / PIPE_DEPTH) % 2;
+
+        char *a_shr = shmem + pipe_idx * STAGE_BYTES;
+        char *b1_shr = a_shr + TILE_SIZE_A / 2;
+        char *b2_shr = b1_shr + TILE_SIZE_B / 2;
+        char *sfa_shr = b2_shr + TILE_SIZE_B / 2;
+        char *sfb1_shr = sfa_shr + TILE_SIZE_SFA;
+        char *sfb2_shr = sfb1_shr + TILE_SIZE_SFB;
+
+        const uint64_t desc_a = make_smem_desc<SWIZZLE_128B>(a_shr, 1, 1024);
+        const uint64_t desc_b1 = make_smem_desc<SWIZZLE_128B>(b1_shr, 1, 1024);
+        const uint64_t desc_b2 = make_smem_desc<SWIZZLE_128B>(b2_shr, 1, 1024);
+        const uint64_t desc_sfa = make_smem_desc<NO_SWIZZLE>(sfa_shr, 128, 128);
+        const uint64_t desc_sfb1 =
+            make_smem_desc<NO_SWIZZLE>(sfb1_shr, 128, 128);
+        const uint64_t desc_sfb2 =
+            make_smem_desc<NO_SWIZZLE>(sfb2_shr, 128, 128);
+
+        wait(&tma_done[pipe_idx], phase);
+
         for (int32_t j = 0; j < 4; j++) {
           tcgen05_cp(desc_sfa + j * 32, tmem_sfa + j * 4);
           tcgen05_cp(desc_sfb1 + j * 32, tmem_sfb1 + j * 4);
           tcgen05_cp(desc_sfb2 + j * 32, tmem_sfb2 + j * 4);
-        }
 
-        const uint32_t sfa_offset = (BLOCK_M == 64) ? (outer_row % 2) * 2 : 0;
-        const uint32_t sfb_offset = (BLOCK_N == 64) ? (outer_col % 2) * 2 : 0;
-        for (int32_t j = 0; j < 4; j++) {
-          if (j == 0 && k == 0) {
-            tcgen05_mma<0, inst_desc, CollectorUsage::FILL>(
-                desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
-                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-                tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-            tcgen05_mma<0, inst_desc, CollectorUsage::LASTUSE>(
-                desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
-                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-                tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-          } else {
-            tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
-                desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
-                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-                tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-            tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
-                desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
-                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-                tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-          }
+          tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
+              desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
+              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+              tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+          tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
+              desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
+              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+              tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
         }
         tcgen05_commit(&matmul_done[pipe_idx]);
       }
