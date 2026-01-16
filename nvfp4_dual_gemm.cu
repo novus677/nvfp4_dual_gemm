@@ -229,6 +229,7 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
       const uint32_t sfa_offset = (BLOCK_M == 64) ? (outer_row % 2) * 2 : 0;
       const uint32_t sfb_offset = (BLOCK_N == 64) ? (outer_col % 2) * 2 : 0;
 
+#pragma unroll 4
       for (int32_t k = 0; k < (K / BLOCK_K); k++) {
         const int32_t pipe_idx = k % PIPE_DEPTH;
         const int32_t phase = (k / PIPE_DEPTH) % 2;
