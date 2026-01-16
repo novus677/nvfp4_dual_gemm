@@ -30,7 +30,7 @@ __device__ void tcgen05_commit(uint64_t *bar) {
 // TMEM FUNCTIONS
 ////////////////////////////////////////////////////////////////////////////////
 
-__device__ void tcgen05_alloc(uint32_t *dst, uint32_t cols) {
+__device__ void tcgen05_alloc(char *dst, uint32_t cols) {
   uint32_t smem_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
   asm volatile(
       "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
@@ -42,6 +42,31 @@ __device__ void tcgen05_dealloc(uint32_t tmem, uint32_t cols) {
   asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
                :
                : "r"(tmem), "r"(cols));
+}
+
+__device__ void tcgen05_ld_16x256b_x2(uint32_t tmem, float d[8]) {
+  asm volatile("{\n"
+               "tcgen05.ld.sync.aligned.16x256b.x2.b32 "
+               "{%0, %1, %2, %3, %4, %5, %6, %7},"
+               " [%8];\n"
+               "}\n"
+               : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3]), "=f"(d[4]),
+                 "=f"(d[5]), "=f"(d[6]), "=f"(d[7])
+               : "r"(tmem));
+}
+
+__device__ void tcgen05_ld_16x256b_x4(uint32_t tmem, float d[16]) {
+  asm volatile("{\n"
+               "tcgen05.ld.sync.aligned.16x256b.x4.b32 "
+               "{%0, %1, %2, %3, %4, %5, %6, %7, "
+               " %8, %9, %10, %11, %12, %13, %14, %15},"
+               " [%16];\n"
+               "}\n"
+               : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3]), "=f"(d[4]),
+                 "=f"(d[5]), "=f"(d[6]), "=f"(d[7]), "=f"(d[8]), "=f"(d[9]),
+                 "=f"(d[10]), "=f"(d[11]), "=f"(d[12]), "=f"(d[13]),
+                 "=f"(d[14]), "=f"(d[15])
+               : "r"(tmem));
 }
 
 __device__ void tcgen05_ld_16x256b_x8(uint32_t tmem, float d[32]) {
@@ -143,6 +168,31 @@ __device__ void tcgen05_ld_16x256b_x32(uint32_t tmem, float d[128]) {
         "=f"(d[121]), "=f"(d[122]), "=f"(d[123]), "=f"(d[124]), "=f"(d[125]),
         "=f"(d[126]), "=f"(d[127])
       : "r"(tmem));
+}
+
+__device__ void tcgen05_ld_32x32b_x8(uint32_t tmem, float d[8]) {
+  asm volatile("{\n"
+               "tcgen05.ld.sync.aligned.32x32b.x8.b32 "
+               "{%0, %1, %2, %3, %4, %5, %6, %7},"
+               " [%8];\n"
+               "}\n"
+               : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3]), "=f"(d[4]),
+                 "=f"(d[5]), "=f"(d[6]), "=f"(d[7])
+               : "r"(tmem));
+}
+
+__device__ void tcgen05_ld_32x32b_x16(uint32_t tmem, float d[16]) {
+  asm volatile("{\n"
+               "tcgen05.ld.sync.aligned.32x32b.x16.b32 "
+               "{%0, %1, %2, %3, %4, %5, %6, %7, "
+               " %8, %9, %10, %11, %12, %13, %14, %15},"
+               " [%16];\n"
+               "}\n"
+               : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3]), "=f"(d[4]),
+                 "=f"(d[5]), "=f"(d[6]), "=f"(d[7]), "=f"(d[8]), "=f"(d[9]),
+                 "=f"(d[10]), "=f"(d[11]), "=f"(d[12]), "=f"(d[13]),
+                 "=f"(d[14]), "=f"(d[15])
+               : "r"(tmem));
 }
 
 __device__ void tcgen05_ld_32x32b_x32(uint32_t tmem, float d[32]) {
@@ -342,7 +392,7 @@ struct CollectorUsage {
   static constexpr char DISCARD[] = "discard";
 };
 
-template <int ScaleD, uint32_t InstDesc, const char *CollectorOp>
+template <int EnableD, uint32_t InstDesc, const char *CollectorOp>
 __device__ void tcgen05_mma(uint64_t desc_a, uint64_t desc_b, uint32_t tmem_d,
                             uint32_t tmem_sfa, uint32_t tmem_sfb) {
   asm volatile("{\n"

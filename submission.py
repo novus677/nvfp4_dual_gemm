@@ -29,34 +29,34 @@ CUDA_HEADERS = [
     // HELPER FUNCTION TO CHECK FOR ERRORS
     ////////////////////////////////////////////////////////////////////////////////
     void cuda_check(CUresult code, const char *file, int line) {
-    if (code != CUDA_SUCCESS) {
+      if (code != CUDA_SUCCESS) {
         char const *str;
         cuGetErrorString(code, &str);
         fprintf(stderr, "CUDA error at %s:%d: %s\n", file, line, str);
         exit(1);
-    }
+      }
     }
 
     void cuda_check(cudaError_t code, const char *file, int line) {
-    if (code != cudaSuccess) {
+      if (code != cudaSuccess) {
         fprintf(stderr, "CUDA error at %s:%n: %s\n", file, line,
                 cudaGetErrorString(code));
         exit(1);
-    }
+      }
     }
 
     // Macro for convenient CUDA error checking
     #define CUDA_CHECK(x)                                                          \
-    do {                                                                         \
+      do {                                                                         \
         cuda_check((x), __FILE__, __LINE__);                                       \
-    } while (0)
+      } while (0)
 
     ////////////////////////////////////////////////////////////////////////////////
     // ASYNC PROXY FENCE
     ////////////////////////////////////////////////////////////////////////////////
 
     __device__ static __forceinline__ void async_proxy_fence() {
-    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+      asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -65,40 +65,44 @@ CUDA_HEADERS = [
 
     __device__ static __forceinline__ void init_barrier(uint64_t *bar,
                                                         int arrival_count) {
-    uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(bar_ptr),
-                "r"(arrival_count)
-                : "memory");
+      uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(bar_ptr),
+                  "r"(arrival_count)
+                  : "memory");
+    }
+
+    __device__ static __forceinline__ void fence_barrier_init() {
+      asm volatile("fence.mbarrier_init.release.cluster;\n");
     }
 
     __device__ static __forceinline__ void arrive(uint64_t *bar, uint32_t count) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0],  %1;\n"
-                :
-                : "r"(mbar_ptr), "r"(count)
-                : "memory");
+      uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0],  %1;\n"
+                  :
+                  : "r"(mbar_ptr), "r"(count)
+                  : "memory");
     }
 
     __device__ static __forceinline__ void wait(uint64_t *bar, int phaseParity) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile("{\n"
-                ".reg .pred                P1;\n"
-                "LAB_WAIT:\n"
-                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
-                "@P1                       bra.uni DONE;\n"
-                "bra.uni                   LAB_WAIT;\n"
-                "DONE:\n"
-                "}\n" ::"r"(mbar_ptr),
-                "r"(phaseParity));
+      uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm volatile("{\n"
+                  ".reg .pred                P1;\n"
+                  "LAB_WAIT:\n"
+                  "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+                  "@P1                       bra.uni DONE;\n"
+                  "bra.uni                   LAB_WAIT;\n"
+                  "DONE:\n"
+                  "}\n" ::"r"(mbar_ptr),
+                  "r"(phaseParity));
     }
 
     __device__ static __forceinline__ void expect_bytes_and_arrive(uint64_t *bar,
-                                                                uint32_t bytes) {
-    uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm("mbarrier.arrive.expect_tx.release.cta.shared.b64 _, [%0], %1;\n "
-        :
-        : "r"(bar_ptr), "r"(bytes)
-        : "memory");
+                                                                  uint32_t bytes) {
+      uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm("mbarrier.arrive.expect_tx.release.cta.shared.b64 _, [%0], %1;\n "
+          :
+          : "r"(bar_ptr), "r"(bytes)
+          : "memory");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -106,12 +110,12 @@ CUDA_HEADERS = [
     ////////////////////////////////////////////////////////////////////////////////
 
     __device__ static __forceinline__ void tma_commit_group() {
-    asm volatile("cp.async.bulk.commit_group;");
+      asm volatile("cp.async.bulk.commit_group;");
     }
 
     template <int N>
     __device__ static __forceinline__ void tma_wait_until_pending() {
-    asm volatile("cp.async.bulk.wait_group %0;" : : "n"(N) : "memory");
+      asm volatile("cp.async.bulk.wait_group %0;" : : "n"(N) : "memory");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -119,9 +123,9 @@ CUDA_HEADERS = [
     ////////////////////////////////////////////////////////////////////////////////
 
     enum class CachePolicy : uint64_t {
-    EVICT_NORMAL = 0x1000000000000000,
-    EVICT_FIRST = 0x12F0000000000000,
-    EVICT_LAST = 0x14F0000000000000,
+      EVICT_NORMAL = 0x1000000000000000,
+      EVICT_FIRST = 0x12F0000000000000,
+      EVICT_LAST = 0x14F0000000000000,
     };
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -130,88 +134,88 @@ CUDA_HEADERS = [
 
     __device__ static __forceinline__ void
     cp_async_bulk_global_to_shared(void *smem_dest, const void *src, int size,
-                                uint64_t *bar, CachePolicy cache_policy) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes."
-        "L2::cache_hint [%0], [%1], %2, [%3], %4;\n"
-        :
-        : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
+                                  uint64_t *bar, CachePolicy cache_policy) {
+      uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm volatile(
+          "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes."
+          "L2::cache_hint [%0], [%1], %2, [%3], %4;\n"
+          :
+          : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
             "l"(src), "r"(size), "r"(mbar_ptr), "l"(cache_policy)
-        : "memory");
+          : "memory");
     }
 
     __device__ static __forceinline__ void cp_async_bulk_tensor_1d_global_to_shared(
         void *smem_dest, const CUtensorMap *tensor_map, int c0, uint64_t *bar,
         CachePolicy cache_policy) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "cp.async.bulk.tensor.1d.shared::cluster.global.tile.mbarrier::complete_"
-        "tx::bytes.L2::cache_hint "
-        "[%0], [%1, {%2}], [%3], %4;\n"
-        :
-        : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
+      uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm volatile(
+          "cp.async.bulk.tensor.1d.shared::cluster.global.tile.mbarrier::complete_"
+          "tx::bytes.L2::cache_hint "
+          "[%0], [%1, {%2}], [%3], %4;\n"
+          :
+          : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
             "l"(tensor_map), "r"(c0), "r"(mbar_ptr), "l"(cache_policy)
-        : "memory");
+          : "memory");
     }
 
     __device__ static __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
         void *smem_dest, const CUtensorMap *tensor_map, int c0, int c1,
         uint64_t *bar, CachePolicy cache_policy) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_"
-        "tx::bytes.L2::cache_hint "
-        "[%0], [%1, {%2, %3}], [%4], %5;\n"
-        :
-        : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
+      uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm volatile(
+          "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_"
+          "tx::bytes.L2::cache_hint "
+          "[%0], [%1, {%2, %3}], [%4], %5;\n"
+          :
+          : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
             "l"(tensor_map), "r"(c0), "r"(c1), "r"(mbar_ptr), "l"(cache_policy)
-        : "memory");
+          : "memory");
     }
 
     __device__ static __forceinline__ void cp_async_bulk_tensor_3d_global_to_shared(
         void *smem_dest, const CUtensorMap *tensor_map, int c0, int c1, int c2,
         uint64_t *bar, CachePolicy cache_policy) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "cp.async.bulk.tensor.3d.shared::cluster.global.tile.mbarrier::complete_"
-        "tx::bytes.L2::cache_hint "
-        "[%0], [%1, {%2, %3, %4}], [%5], %6;\n"
-        :
-        : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
+      uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm volatile(
+          "cp.async.bulk.tensor.3d.shared::cluster.global.tile.mbarrier::complete_"
+          "tx::bytes.L2::cache_hint "
+          "[%0], [%1, {%2, %3, %4}], [%5], %6;\n"
+          :
+          : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
             "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2), "r"(mbar_ptr),
             "l"(cache_policy)
-        : "memory");
+          : "memory");
     }
 
     __device__ static __forceinline__ void cp_async_bulk_tensor_4d_global_to_shared(
         void *smem_dest, const CUtensorMap *tensor_map, int c0, int c1, int c2,
         int c3, uint64_t *bar, CachePolicy cache_policy) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "cp.async.bulk.tensor.4d.shared::cluster.global.tile.mbarrier::complete_"
-        "tx::bytes.L2::cache_hint "
-        "[%0], [%1, {%2, %3, %4, %5}], [%6], %7;\n"
-        :
-        : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
+      uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm volatile(
+          "cp.async.bulk.tensor.4d.shared::cluster.global.tile.mbarrier::complete_"
+          "tx::bytes.L2::cache_hint "
+          "[%0], [%1, {%2, %3, %4, %5}], [%6], %7;\n"
+          :
+          : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
             "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(mbar_ptr),
             "l"(cache_policy)
-        : "memory");
+          : "memory");
     }
 
     __device__ static __forceinline__ void cp_async_bulk_tensor_5d_global_to_shared(
         void *smem_dest, const CUtensorMap *tensor_map, int c0, int c1, int c2,
         int c3, int c4, uint64_t *bar, CachePolicy cache_policy) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "cp.async.bulk.tensor.5d.shared::cluster.global.tile.mbarrier::complete_"
-        "tx::bytes.L2::cache_hint "
-        "[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;\n"
-        :
-        : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
+      uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+      asm volatile(
+          "cp.async.bulk.tensor.5d.shared::cluster.global.tile.mbarrier::complete_"
+          "tx::bytes.L2::cache_hint "
+          "[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;\n"
+          :
+          : "r"(static_cast<uint32_t>(__cvta_generic_to_shared(smem_dest))),
             "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4),
             "r"(mbar_ptr), "l"(cache_policy)
-        : "memory");
+          : "memory");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -221,58 +225,58 @@ CUDA_HEADERS = [
     __device__ static __forceinline__ void
     cp_async_bulk_tensor_1d_shared_to_global(const CUtensorMap *tensor_map, int c0,
                                             const void *src) {
-    asm volatile("cp.async.bulk.tensor.1d.global.shared::cta.tile.bulk_group "
-                "[%0, {%1}], [%2];\n"
-                :
-                : "l"(tensor_map), "r"(c0),
+      asm volatile("cp.async.bulk.tensor.1d.global.shared::cta.tile.bulk_group "
+                  "[%0, {%1}], [%2];\n"
+                  :
+                  : "l"(tensor_map), "r"(c0),
                     "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src)))
-                : "memory");
+                  : "memory");
     }
 
     __device__ static __forceinline__ void
     cp_async_bulk_tensor_2d_shared_to_global(const CUtensorMap *tensor_map, int c0,
                                             int c1, const void *src) {
-    asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group "
-                "[%0, {%1, %2}], [%3];\n"
-                :
-                : "l"(tensor_map), "r"(c0), "r"(c1),
+      asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group "
+                  "[%0, {%1, %2}], [%3];\n"
+                  :
+                  : "l"(tensor_map), "r"(c0), "r"(c1),
                     "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src)))
-                : "memory");
+                  : "memory");
     }
 
     __device__ static __forceinline__ void
     cp_async_bulk_tensor_3d_shared_to_global(const CUtensorMap *tensor_map, int c0,
                                             int c1, int c2, const void *src) {
-    asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group "
-                "[%0, {%1, %2, %3}], [%4];\n"
-                :
-                : "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2),
+      asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group "
+                  "[%0, {%1, %2, %3}], [%4];\n"
+                  :
+                  : "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2),
                     "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src)))
-                : "memory");
+                  : "memory");
     }
 
     __device__ static __forceinline__ void
     cp_async_bulk_tensor_4d_shared_to_global(const CUtensorMap *tensor_map, int c0,
                                             int c1, int c2, int c3,
                                             const void *src) {
-    asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group "
-                "[%0, {%1, %2, %3, %4}], [%5];\n"
-                :
-                : "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2), "r"(c3),
+      asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group "
+                  "[%0, {%1, %2, %3, %4}], [%5];\n"
+                  :
+                  : "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2), "r"(c3),
                     "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src)))
-                : "memory");
+                  : "memory");
     }
 
     __device__ static __forceinline__ void
     cp_async_bulk_tensor_5d_shared_to_global(const CUtensorMap *tensor_map, int c0,
                                             int c1, int c2, int c3, int c4,
                                             const void *src) {
-    asm volatile("cp.async.bulk.tensor.5d.global.shared::cta.tile.bulk_group "
-                "[%0, {%1, %2, %3, %4, %5}], [%6];\n"
-                :
-                : "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4),
+      asm volatile("cp.async.bulk.tensor.5d.global.shared::cta.tile.bulk_group "
+                  "[%0, {%1, %2, %3, %4, %5}], [%6];\n"
+                  :
+                  : "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4),
                     "r"(static_cast<uint32_t>(__cvta_generic_to_shared(src)))
-                : "memory");
+                  : "memory");
     }
     """,
     r"""
@@ -306,7 +310,7 @@ CUDA_HEADERS = [
     // TMEM FUNCTIONS
     ////////////////////////////////////////////////////////////////////////////////
 
-    __device__ void tcgen05_alloc(uint32_t *dst, uint32_t cols) {
+    __device__ void tcgen05_alloc(char *dst, uint32_t cols) {
     uint32_t smem_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
@@ -318,6 +322,17 @@ CUDA_HEADERS = [
     asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
                 :
                 : "r"(tmem), "r"(cols));
+    }
+
+    __device__ void tcgen05_ld_16x256b_x2(uint32_t tmem, float d[8]) {
+      asm volatile("{\n"
+                  "tcgen05.ld.sync.aligned.16x256b.x2.b32 "
+                  "{%0, %1, %2, %3, %4, %5, %6, %7},"
+                  " [%8];\n"
+                  "}\n"
+                  : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3]), "=f"(d[4]),
+                    "=f"(d[5]), "=f"(d[6]), "=f"(d[7])
+                  : "r"(tmem));
     }
 
     __device__ void tcgen05_ld_16x256b_x4(uint32_t tmem, float d[16]) {
@@ -691,8 +706,11 @@ __device__ __forceinline__ float silu(float x) {
 }
 
 __device__ __forceinline__ float silu_fast(float x) {
-  float y = 0.5 * x;
-  return fmaf(y, __tanhf(y), y);
+  return fmaf(0.5f * x, __tanhf(0.5f * x), 0.5f * x);
+}
+
+__device__ __forceinline__ float silu_fast2(float x) {
+  return fmaf(0.5f * x, __tanhf(0.49995f * x), 0.5f * x);
 }
 
 __device__ __forceinline__ void sync_wg(int wg_id) {
@@ -712,19 +730,19 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
 }
 
 template <int32_t K, int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K,
-          int32_t PIPE_DEPTH, bool FAST_SILU, bool TRANSPOSE>
-__global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
-    nvfp4_dual_gemm(int M, int N, __grid_constant__ const CUtensorMap a_map,
-                    __grid_constant__ const CUtensorMap b1_map,
-                    __grid_constant__ const CUtensorMap b2_map,
-                    uint8_t *SFA_ptr, uint8_t *SFB1_ptr, uint8_t *SFB2_ptr,
-                    half *C_ptr) {
+          int32_t PIPE_DEPTH, bool FAST_SILU, bool FAST_SILU2, bool TRANSPOSE>
+__global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
+    nvfp4_dual_gemm_cutlass(int M, int N,
+                            __grid_constant__ const CUtensorMap a_map,
+                            __grid_constant__ const CUtensorMap b1_map,
+                            __grid_constant__ const CUtensorMap b2_map,
+                            uint8_t *SFA_ptr, uint8_t *SFB1_ptr,
+                            uint8_t *SFB2_ptr, half *C_ptr) {
 
   extern __shared__ __align__(1024) char shmem[];
   __shared__ __align__(8) uint64_t matmul_done[PIPE_DEPTH];
   __shared__ __align__(8) uint64_t tma_done[PIPE_DEPTH];
   __shared__ __align__(8) uint64_t final_matmul_done[1];
-  __shared__ uint32_t tmem_base[1];
 
   constexpr int32_t TILE_SIZE_A = BLOCK_K * BLOCK_M;
   constexpr int32_t TILE_SIZE_B = BLOCK_K * BLOCK_N;
@@ -751,23 +769,27 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
       init_barrier(&tma_done[i], 1);
     }
     init_barrier(&final_matmul_done[0], 1);
-    async_proxy_fence();
+    fence_barrier_init();
   } else if (warp_id == 1) {
-    tcgen05_alloc(&tmem_base[0], 512);
+    tcgen05_alloc(&shmem[0], 512);
   }
   __syncthreads();
 
   if (warp_id < 4) { // epilogue warps
-    const uint32_t tmem_d1 = tmem_base[0];
-    const uint32_t tmem_d2 = tmem_d1 + BLOCK_N;
-    constexpr auto silu_func = FAST_SILU ? silu_fast : silu;
+    warpgroup_reg_alloc<256>();
 
-    float acc1[BLOCK_N / 4];
-    float acc2[BLOCK_N / 4];
+    constexpr uint32_t tmem_d1 = 0;
+    constexpr uint32_t tmem_d2 = tmem_d1 + BLOCK_N;
+    constexpr auto silu_func = FAST_SILU    ? silu_fast
+                               : FAST_SILU2 ? silu_fast2
+                                            : silu;
 
     wait(&final_matmul_done[0], 0);
 
     if constexpr (TRANSPOSE) {
+      float acc1[BLOCK_N / 4];
+      float acc2[BLOCK_N / 4];
+
       half *c_off = C_ptr + (outer_col * BLOCK_N) * M + (outer_row * BLOCK_M);
       for (int32_t r = 0; r < 4; r++) {
         if constexpr (BLOCK_N == 128) {
@@ -786,6 +808,9 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
         }
       }
     } else {
+      float acc1[BLOCK_N / 4];
+      float acc2[BLOCK_N / 4];
+
       half *c_off = C_ptr + (outer_row * BLOCK_M) * N + (outer_col * BLOCK_N);
       for (int32_t r0 = 0; r0 < 2; r0++) {
         for (int32_t r1 = 0; r1 < 2; r1++) {
@@ -822,7 +847,7 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
 
     sync_wg(0);
     if (warp_id == 0) {
-      tcgen05_dealloc(tmem_d1, 512);
+      tcgen05_dealloc(0, 512);
     }
   } else {
     if (warp_id == 4 && elect_one_sync()) { // issue TMAs
@@ -854,22 +879,19 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
             SFA_ptr + ((outer_row * BLOCK_M / 128) * ((K / SF_VEC_SIZE) / 4) +
                        k * 4) *
                           512,
-            TILE_SIZE_SFA, &tma_done[pipe_idx],
-            BLOCK_M == 64 ? CachePolicy::EVICT_LAST : cache_policy_a);
+            TILE_SIZE_SFA, &tma_done[pipe_idx], cache_policy_a);
         cp_async_bulk_global_to_shared(
             sfb1_shr,
             SFB1_ptr + ((outer_col * BLOCK_N / 128) * ((K / SF_VEC_SIZE) / 4) +
                         k * 4) *
                            512,
-            TILE_SIZE_SFB, &tma_done[pipe_idx],
-            BLOCK_N == 64 ? CachePolicy::EVICT_LAST : cache_policy_b);
+            TILE_SIZE_SFB, &tma_done[pipe_idx], cache_policy_b);
         cp_async_bulk_global_to_shared(
             sfb2_shr,
             SFB2_ptr + ((outer_col * BLOCK_N / 128) * ((K / SF_VEC_SIZE) / 4) +
                         k * 4) *
                            512,
-            TILE_SIZE_SFB, &tma_done[pipe_idx],
-            BLOCK_N == 64 ? CachePolicy::EVICT_LAST : cache_policy_b);
+            TILE_SIZE_SFB, &tma_done[pipe_idx], cache_policy_b);
       };
 
       for (int32_t k = 0; k < PIPE_DEPTH; k++) {
@@ -882,11 +904,11 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
         issue_tma(k, pipe_idx);
       }
     } else if (warp_id == 5 && elect_one_sync()) { // issue UMMAs
-      const uint32_t tmem_d1 = tmem_base[0];
-      const uint32_t tmem_d2 = tmem_d1 + BLOCK_N;
-      const uint32_t tmem_sfa = tmem_d2 + BLOCK_N;
-      const uint32_t tmem_sfb1 = tmem_sfa + TMEM_WIDTH_SFA;
-      const uint32_t tmem_sfb2 = tmem_sfb1 + TMEM_WIDTH_SFB;
+      constexpr uint32_t tmem_d1 = 0;
+      constexpr uint32_t tmem_d2 = tmem_d1 + BLOCK_N;
+      constexpr uint32_t tmem_sfa = tmem_d2 + BLOCK_N;
+      constexpr uint32_t tmem_sfb1 = tmem_sfa + TMEM_WIDTH_SFA;
+      constexpr uint32_t tmem_sfb2 = tmem_sfb1 + TMEM_WIDTH_SFB;
 
       constexpr uint32_t inst_desc =
           make_inst_desc<BLOCK_M, BLOCK_N, UMMA_K, 0, 0>();
@@ -894,60 +916,9 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
       const uint32_t sfa_offset = (BLOCK_M == 64) ? (outer_row % 2) * 2 : 0;
       const uint32_t sfb_offset = (BLOCK_N == 64) ? (outer_col % 2) * 2 : 0;
 
-      int32_t pipe_idx;
-      uint32_t phase;
-      for (int32_t k = 0; k < 1; k++) {
-        pipe_idx = k % PIPE_DEPTH;
-        phase = (k / PIPE_DEPTH) % 2;
-
-        char *a_shr = shmem + pipe_idx * STAGE_BYTES;
-        char *b1_shr = a_shr + TILE_SIZE_A / 2;
-        char *b2_shr = b1_shr + TILE_SIZE_B / 2;
-        char *sfa_shr = b2_shr + TILE_SIZE_B / 2;
-        char *sfb1_shr = sfa_shr + TILE_SIZE_SFA;
-        char *sfb2_shr = sfb1_shr + TILE_SIZE_SFB;
-
-        const uint64_t desc_a = make_smem_desc<SWIZZLE_128B>(a_shr, 1, 1024);
-        const uint64_t desc_b1 = make_smem_desc<SWIZZLE_128B>(b1_shr, 1, 1024);
-        const uint64_t desc_b2 = make_smem_desc<SWIZZLE_128B>(b2_shr, 1, 1024);
-        const uint64_t desc_sfa = make_smem_desc<NO_SWIZZLE>(sfa_shr, 128, 128);
-        const uint64_t desc_sfb1 =
-            make_smem_desc<NO_SWIZZLE>(sfb1_shr, 128, 128);
-        const uint64_t desc_sfb2 =
-            make_smem_desc<NO_SWIZZLE>(sfb2_shr, 128, 128);
-
-        wait(&tma_done[pipe_idx], phase);
-
-        tcgen05_cp(desc_sfa, tmem_sfa);
-        tcgen05_cp(desc_sfb1, tmem_sfb1);
-        tcgen05_cp(desc_sfb2, tmem_sfb2);
-
-        tcgen05_mma<0, inst_desc, CollectorUsage::FILL>(
-            desc_a, desc_b1, tmem_d1, tmem_sfa + sfa_offset,
-            tmem_sfb1 + sfb_offset);
-        tcgen05_mma<0, inst_desc, CollectorUsage::LASTUSE>(
-            desc_a, desc_b2, tmem_d2, tmem_sfa + sfa_offset,
-            tmem_sfb2 + sfb_offset);
-
-        for (int32_t j = 1; j < 4; j++) {
-          tcgen05_cp(desc_sfa + j * 32, tmem_sfa + j * 4);
-          tcgen05_cp(desc_sfb1 + j * 32, tmem_sfb1 + j * 4);
-          tcgen05_cp(desc_sfb2 + j * 32, tmem_sfb2 + j * 4);
-
-          tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
-              desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
-              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-              tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-          tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
-              desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
-              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-              tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-        }
-        tcgen05_commit(&matmul_done[pipe_idx]);
-      }
-      for (int32_t k = 1; k < (K / BLOCK_K); k++) {
-        pipe_idx = k % PIPE_DEPTH;
-        phase = (k / PIPE_DEPTH) % 2;
+      for (int32_t k = 0; k < (K / BLOCK_K); k++) {
+        const int32_t pipe_idx = k % PIPE_DEPTH;
+        const int32_t phase = (k / PIPE_DEPTH) % 2;
 
         char *a_shr = shmem + pipe_idx * STAGE_BYTES;
         char *b1_shr = a_shr + TILE_SIZE_A / 2;
@@ -972,25 +943,36 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
           tcgen05_cp(desc_sfb1 + j * 32, tmem_sfb1 + j * 4);
           tcgen05_cp(desc_sfb2 + j * 32, tmem_sfb2 + j * 4);
 
-          tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
-              desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
-              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-              tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-          tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
-              desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
-              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-              tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+          if (j == 0 && k == 0) {
+            tcgen05_mma<0, inst_desc, CollectorUsage::FILL>(
+                desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
+                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+                tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+            tcgen05_mma<0, inst_desc, CollectorUsage::LASTUSE>(
+                desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
+                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+                tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+          } else {
+            tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
+                desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
+                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+                tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+            tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
+                desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
+                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+                tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+          }
         }
         tcgen05_commit(&matmul_done[pipe_idx]);
       }
-      wait(&matmul_done[pipe_idx], phase);
       tcgen05_commit(&final_matmul_done[0]);
     }
   }
 }
 
 template <int32_t K, int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K,
-          int32_t PIPE_DEPTH, bool FAST_SILU, bool TRANSPOSE, int32_t GRID_DIM>
+          int32_t PIPE_DEPTH, bool FAST_SILU, bool FAST_SILU2, bool TRANSPOSE,
+          int32_t GRID_DIM>
 void launch_nvfp4_dual_gemm(int M, int N, uint8_t *A_ptr, uint8_t *B1_ptr,
                             uint8_t *B2_ptr, uint8_t *SFA_ptr,
                             uint8_t *SFB1_ptr, uint8_t *SFB2_ptr, half *C_ptr) {
@@ -1031,23 +1013,25 @@ void launch_nvfp4_dual_gemm(int M, int N, uint8_t *A_ptr, uint8_t *B1_ptr,
   constexpr int32_t shmem_size =
       shmem_size_a + 2 * shmem_size_b + shmem_size_sfa + 2 * shmem_size_sfb;
   static_assert(shmem_size <= 227 * 1024, "Shared memory size exceeds 227 KB");
-  cudaFuncSetAttribute(nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH,
-                                       FAST_SILU, TRANSPOSE>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+  cudaFuncSetAttribute(
+      nvfp4_dual_gemm_cutlass<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH,
+                              FAST_SILU, FAST_SILU2, TRANSPOSE>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
 
   // const int32_t num_rows = CEIL_DIV(M, BLOCK_M);
   // const int32_t num_cols = CEIL_DIV(N, BLOCK_N);
 
-  nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,
-                  TRANSPOSE><<<GRID_DIM, BLOCK_DIM, shmem_size>>>(
-      M, N, tensorMapA, tensorMapB1, tensorMapB2, SFA_ptr, SFB1_ptr, SFB2_ptr,
-      C_ptr);
+  nvfp4_dual_gemm_cutlass<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,
+                          FAST_SILU2, TRANSPOSE>
+      <<<GRID_DIM, BLOCK_DIM, shmem_size>>>(M, N, tensorMapA, tensorMapB1,
+                                            tensorMapB2, SFA_ptr, SFB1_ptr,
+                                            SFB2_ptr, C_ptr);
 }
 
-#define LAUNCH(K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU, TRANSPOSE, \
-               GRID_DIM)                                                       \
+#define LAUNCH(K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,            \
+               FAST_SILU2, TRANSPOSE, GRID_DIM)                                \
   launch_nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,  \
-                         TRANSPOSE, GRID_DIM>(                                 \
+                         FAST_SILU2, TRANSPOSE, GRID_DIM>(                     \
       M, N, A_ptr, B1_ptr, B2_ptr, SFA_ptr, SFB1_ptr, SFB2_ptr, C_ptr)
 
 torch::Tensor
@@ -1074,43 +1058,43 @@ cuda_nvfp4_dual_gemm(const torch::Tensor &A, const torch::Tensor &B1,
 
   switch (hash(M, N, K)) {
   [[likely]] case hash(256, 4096, 7168):
-    LAUNCH(7168, 128, 64, 256, 5, true, false, 128);
+    LAUNCH(7168, 128, 64, 256, 5, true, false, false, 128);
     return C;
   [[likely]] case hash(512, 4096, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false, 128);
+    LAUNCH(7168, 128, 128, 256, 4, false, true, false, 128);
     return C;
   [[likely]] case hash(256, 3072, 4096):
-    LAUNCH(4096, 128, 64, 256, 5, true, false, 96);
+    LAUNCH(4096, 128, 64, 256, 5, true, false, false, 96);
     return C;
   [[likely]] case hash(512, 3072, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, true, true, 96);
+    LAUNCH(7168, 128, 128, 256, 4, true, false, true, 96);
     return C.view({N, M, 1}).transpose(0, 1);
   [[unlikely]] case hash(1536, 512, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false, 48);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, false, 48);
     return C;
   [[unlikely]] case hash(256, 512, 256):
-    LAUNCH(256, 128, 128, 256, 4, false, false, 8);
+    LAUNCH(256, 128, 128, 256, 4, false, false, false, 8);
     return C;
   [[unlikely]] case hash(3072, 1024, 1536):
-    LAUNCH(1536, 128, 128, 256, 4, false, false, 192);
+    LAUNCH(1536, 128, 128, 256, 4, false, false, false, 192);
     return C;
   [[unlikely]] case hash(7168, 1024, 256):
-    LAUNCH(256, 128, 128, 256, 4, false, false, 448);
+    LAUNCH(256, 128, 128, 256, 4, false, false, false, 448);
     return C;
   [[unlikely]] case hash(7168, 2304, 2048):
-    LAUNCH(2048, 128, 128, 256, 4, false, false, 1008);
+    LAUNCH(2048, 128, 128, 256, 4, false, false, false, 1008);
     return C;
   [[unlikely]] case hash(4608, 384, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false, 108);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, false, 108);
     return C;
   [[unlikely]] case hash(7168, 384, 2304):
-    LAUNCH(2304, 128, 128, 256, 4, false, false, 168);
+    LAUNCH(2304, 128, 128, 256, 4, false, false, false, 168);
     return C;
   [[unlikely]] case hash(512, 768, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false, 24);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, false, 24);
     return C;
   [[unlikely]] case hash(4096, 768, 512):
-    LAUNCH(512, 128, 128, 256, 4, false, false, 192);
+    LAUNCH(512, 128, 128, 256, 4, false, false, false, 192);
     return C;
   [[unlikely]] default:
     return C;

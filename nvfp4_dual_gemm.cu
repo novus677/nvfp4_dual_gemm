@@ -19,8 +19,11 @@ __device__ __forceinline__ float silu(float x) {
 }
 
 __device__ __forceinline__ float silu_fast(float x) {
-  float y = 0.5 * x;
-  return fmaf(y, __tanhf(y), y);
+  return fmaf(0.5f * x, __tanhf(0.5f * x), 0.5f * x);
+}
+
+__device__ __forceinline__ float silu_fast2(float x) {
+  return fmaf(0.5f * x, __tanhf(0.49995f * x), 0.5f * x);
 }
 
 __device__ __forceinline__ void sync_wg(int wg_id) {
@@ -40,19 +43,19 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
 }
 
 template <int32_t K, int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K,
-          int32_t PIPE_DEPTH, bool FAST_SILU, bool TRANSPOSE>
-__global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
-    nvfp4_dual_gemm(int M, int N, __grid_constant__ const CUtensorMap a_map,
-                    __grid_constant__ const CUtensorMap b1_map,
-                    __grid_constant__ const CUtensorMap b2_map,
-                    uint8_t *SFA_ptr, uint8_t *SFB1_ptr, uint8_t *SFB2_ptr,
-                    half *C_ptr) {
+          int32_t PIPE_DEPTH, bool FAST_SILU, bool FAST_SILU2, bool TRANSPOSE>
+__global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
+    nvfp4_dual_gemm_cutlass(int M, int N,
+                            __grid_constant__ const CUtensorMap a_map,
+                            __grid_constant__ const CUtensorMap b1_map,
+                            __grid_constant__ const CUtensorMap b2_map,
+                            uint8_t *SFA_ptr, uint8_t *SFB1_ptr,
+                            uint8_t *SFB2_ptr, half *C_ptr) {
 
   extern __shared__ __align__(1024) char shmem[];
   __shared__ __align__(8) uint64_t matmul_done[PIPE_DEPTH];
   __shared__ __align__(8) uint64_t tma_done[PIPE_DEPTH];
   __shared__ __align__(8) uint64_t final_matmul_done[1];
-  __shared__ uint32_t tmem_base[1];
 
   constexpr int32_t TILE_SIZE_A = BLOCK_K * BLOCK_M;
   constexpr int32_t TILE_SIZE_B = BLOCK_K * BLOCK_N;
@@ -79,23 +82,27 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
       init_barrier(&tma_done[i], 1);
     }
     init_barrier(&final_matmul_done[0], 1);
-    async_proxy_fence();
+    fence_barrier_init();
   } else if (warp_id == 1) {
-    tcgen05_alloc(&tmem_base[0], 512);
+    tcgen05_alloc(&shmem[0], 512);
   }
   __syncthreads();
 
   if (warp_id < 4) { // epilogue warps
-    const uint32_t tmem_d1 = tmem_base[0];
-    const uint32_t tmem_d2 = tmem_d1 + BLOCK_N;
-    constexpr auto silu_func = FAST_SILU ? silu_fast : silu;
+    warpgroup_reg_alloc<256>();
 
-    float acc1[BLOCK_N / 4];
-    float acc2[BLOCK_N / 4];
+    constexpr uint32_t tmem_d1 = 0;
+    constexpr uint32_t tmem_d2 = tmem_d1 + BLOCK_N;
+    constexpr auto silu_func = FAST_SILU    ? silu_fast
+                               : FAST_SILU2 ? silu_fast2
+                                            : silu;
 
     wait(&final_matmul_done[0], 0);
 
     if constexpr (TRANSPOSE) {
+      float acc1[BLOCK_N / 4];
+      float acc2[BLOCK_N / 4];
+
       half *c_off = C_ptr + (outer_col * BLOCK_N) * M + (outer_row * BLOCK_M);
       for (int32_t r = 0; r < 4; r++) {
         if constexpr (BLOCK_N == 128) {
@@ -114,6 +121,9 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
         }
       }
     } else {
+      float acc1[BLOCK_N / 4];
+      float acc2[BLOCK_N / 4];
+
       half *c_off = C_ptr + (outer_row * BLOCK_M) * N + (outer_col * BLOCK_N);
       for (int32_t r0 = 0; r0 < 2; r0++) {
         for (int32_t r1 = 0; r1 < 2; r1++) {
@@ -150,7 +160,7 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
 
     sync_wg(0);
     if (warp_id == 0) {
-      tcgen05_dealloc(tmem_d1, 512);
+      tcgen05_dealloc(0, 512);
     }
   } else {
     if (warp_id == 4 && elect_one_sync()) { // issue TMAs
@@ -182,22 +192,19 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
             SFA_ptr + ((outer_row * BLOCK_M / 128) * ((K / SF_VEC_SIZE) / 4) +
                        k * 4) *
                           512,
-            TILE_SIZE_SFA, &tma_done[pipe_idx],
-            BLOCK_M == 64 ? CachePolicy::EVICT_LAST : cache_policy_a);
+            TILE_SIZE_SFA, &tma_done[pipe_idx], cache_policy_a);
         cp_async_bulk_global_to_shared(
             sfb1_shr,
             SFB1_ptr + ((outer_col * BLOCK_N / 128) * ((K / SF_VEC_SIZE) / 4) +
                         k * 4) *
                            512,
-            TILE_SIZE_SFB, &tma_done[pipe_idx],
-            BLOCK_N == 64 ? CachePolicy::EVICT_LAST : cache_policy_b);
+            TILE_SIZE_SFB, &tma_done[pipe_idx], cache_policy_b);
         cp_async_bulk_global_to_shared(
             sfb2_shr,
             SFB2_ptr + ((outer_col * BLOCK_N / 128) * ((K / SF_VEC_SIZE) / 4) +
                         k * 4) *
                            512,
-            TILE_SIZE_SFB, &tma_done[pipe_idx],
-            BLOCK_N == 64 ? CachePolicy::EVICT_LAST : cache_policy_b);
+            TILE_SIZE_SFB, &tma_done[pipe_idx], cache_policy_b);
       };
 
       for (int32_t k = 0; k < PIPE_DEPTH; k++) {
@@ -210,11 +217,11 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
         issue_tma(k, pipe_idx);
       }
     } else if (warp_id == 5 && elect_one_sync()) { // issue UMMAs
-      const uint32_t tmem_d1 = tmem_base[0];
-      const uint32_t tmem_d2 = tmem_d1 + BLOCK_N;
-      const uint32_t tmem_sfa = tmem_d2 + BLOCK_N;
-      const uint32_t tmem_sfb1 = tmem_sfa + TMEM_WIDTH_SFA;
-      const uint32_t tmem_sfb2 = tmem_sfb1 + TMEM_WIDTH_SFB;
+      constexpr uint32_t tmem_d1 = 0;
+      constexpr uint32_t tmem_d2 = tmem_d1 + BLOCK_N;
+      constexpr uint32_t tmem_sfa = tmem_d2 + BLOCK_N;
+      constexpr uint32_t tmem_sfb1 = tmem_sfa + TMEM_WIDTH_SFA;
+      constexpr uint32_t tmem_sfb2 = tmem_sfb1 + TMEM_WIDTH_SFB;
 
       constexpr uint32_t inst_desc =
           make_inst_desc<BLOCK_M, BLOCK_N, UMMA_K, 0, 0>();
@@ -222,60 +229,9 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
       const uint32_t sfa_offset = (BLOCK_M == 64) ? (outer_row % 2) * 2 : 0;
       const uint32_t sfb_offset = (BLOCK_N == 64) ? (outer_col % 2) * 2 : 0;
 
-      int32_t pipe_idx;
-      uint32_t phase;
-      for (int32_t k = 0; k < 1; k++) {
-        pipe_idx = k % PIPE_DEPTH;
-        phase = (k / PIPE_DEPTH) % 2;
-
-        char *a_shr = shmem + pipe_idx * STAGE_BYTES;
-        char *b1_shr = a_shr + TILE_SIZE_A / 2;
-        char *b2_shr = b1_shr + TILE_SIZE_B / 2;
-        char *sfa_shr = b2_shr + TILE_SIZE_B / 2;
-        char *sfb1_shr = sfa_shr + TILE_SIZE_SFA;
-        char *sfb2_shr = sfb1_shr + TILE_SIZE_SFB;
-
-        const uint64_t desc_a = make_smem_desc<SWIZZLE_128B>(a_shr, 1, 1024);
-        const uint64_t desc_b1 = make_smem_desc<SWIZZLE_128B>(b1_shr, 1, 1024);
-        const uint64_t desc_b2 = make_smem_desc<SWIZZLE_128B>(b2_shr, 1, 1024);
-        const uint64_t desc_sfa = make_smem_desc<NO_SWIZZLE>(sfa_shr, 128, 128);
-        const uint64_t desc_sfb1 =
-            make_smem_desc<NO_SWIZZLE>(sfb1_shr, 128, 128);
-        const uint64_t desc_sfb2 =
-            make_smem_desc<NO_SWIZZLE>(sfb2_shr, 128, 128);
-
-        wait(&tma_done[pipe_idx], phase);
-
-        tcgen05_cp(desc_sfa, tmem_sfa);
-        tcgen05_cp(desc_sfb1, tmem_sfb1);
-        tcgen05_cp(desc_sfb2, tmem_sfb2);
-
-        tcgen05_mma<0, inst_desc, CollectorUsage::FILL>(
-            desc_a, desc_b1, tmem_d1, tmem_sfa + sfa_offset,
-            tmem_sfb1 + sfb_offset);
-        tcgen05_mma<0, inst_desc, CollectorUsage::LASTUSE>(
-            desc_a, desc_b2, tmem_d2, tmem_sfa + sfa_offset,
-            tmem_sfb2 + sfb_offset);
-
-        for (int32_t j = 1; j < 4; j++) {
-          tcgen05_cp(desc_sfa + j * 32, tmem_sfa + j * 4);
-          tcgen05_cp(desc_sfb1 + j * 32, tmem_sfb1 + j * 4);
-          tcgen05_cp(desc_sfb2 + j * 32, tmem_sfb2 + j * 4);
-
-          tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
-              desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
-              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-              tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-          tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
-              desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
-              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-              tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-        }
-        tcgen05_commit(&matmul_done[pipe_idx]);
-      }
-      for (int32_t k = 1; k < (K / BLOCK_K); k++) {
-        pipe_idx = k % PIPE_DEPTH;
-        phase = (k / PIPE_DEPTH) % 2;
+      for (int32_t k = 0; k < (K / BLOCK_K); k++) {
+        const int32_t pipe_idx = k % PIPE_DEPTH;
+        const int32_t phase = (k / PIPE_DEPTH) % 2;
 
         char *a_shr = shmem + pipe_idx * STAGE_BYTES;
         char *b1_shr = a_shr + TILE_SIZE_A / 2;
@@ -300,25 +256,36 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE)
           tcgen05_cp(desc_sfb1 + j * 32, tmem_sfb1 + j * 4);
           tcgen05_cp(desc_sfb2 + j * 32, tmem_sfb2 + j * 4);
 
-          tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
-              desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
-              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-              tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
-          tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
-              desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
-              tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
-              tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+          if (j == 0 && k == 0) {
+            tcgen05_mma<0, inst_desc, CollectorUsage::FILL>(
+                desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
+                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+                tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+            tcgen05_mma<0, inst_desc, CollectorUsage::LASTUSE>(
+                desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
+                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+                tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+          } else {
+            tcgen05_mma<1, inst_desc, CollectorUsage::FILL>(
+                desc_a + j * 2, desc_b1 + j * 2, tmem_d1,
+                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+                tmem_sfb1 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+            tcgen05_mma<1, inst_desc, CollectorUsage::LASTUSE>(
+                desc_a + j * 2, desc_b2 + j * 2, tmem_d2,
+                tmem_sfa + j * (TMEM_WIDTH_SFA / 4) + sfa_offset,
+                tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
+          }
         }
         tcgen05_commit(&matmul_done[pipe_idx]);
       }
-      wait(&matmul_done[pipe_idx], phase);
       tcgen05_commit(&final_matmul_done[0]);
     }
   }
 }
 
 template <int32_t K, int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K,
-          int32_t PIPE_DEPTH, bool FAST_SILU, bool TRANSPOSE, int32_t GRID_DIM>
+          int32_t PIPE_DEPTH, bool FAST_SILU, bool FAST_SILU2, bool TRANSPOSE,
+          int32_t GRID_DIM>
 void launch_nvfp4_dual_gemm(int M, int N, uint8_t *A_ptr, uint8_t *B1_ptr,
                             uint8_t *B2_ptr, uint8_t *SFA_ptr,
                             uint8_t *SFB1_ptr, uint8_t *SFB2_ptr, half *C_ptr) {
@@ -359,23 +326,25 @@ void launch_nvfp4_dual_gemm(int M, int N, uint8_t *A_ptr, uint8_t *B1_ptr,
   constexpr int32_t shmem_size =
       shmem_size_a + 2 * shmem_size_b + shmem_size_sfa + 2 * shmem_size_sfb;
   static_assert(shmem_size <= 227 * 1024, "Shared memory size exceeds 227 KB");
-  cudaFuncSetAttribute(nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH,
-                                       FAST_SILU, TRANSPOSE>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+  cudaFuncSetAttribute(
+      nvfp4_dual_gemm_cutlass<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH,
+                              FAST_SILU, FAST_SILU2, TRANSPOSE>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
 
   // const int32_t num_rows = CEIL_DIV(M, BLOCK_M);
   // const int32_t num_cols = CEIL_DIV(N, BLOCK_N);
 
-  nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,
-                  TRANSPOSE><<<GRID_DIM, BLOCK_DIM, shmem_size>>>(
-      M, N, tensorMapA, tensorMapB1, tensorMapB2, SFA_ptr, SFB1_ptr, SFB2_ptr,
-      C_ptr);
+  nvfp4_dual_gemm_cutlass<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,
+                          FAST_SILU2, TRANSPOSE>
+      <<<GRID_DIM, BLOCK_DIM, shmem_size>>>(M, N, tensorMapA, tensorMapB1,
+                                            tensorMapB2, SFA_ptr, SFB1_ptr,
+                                            SFB2_ptr, C_ptr);
 }
 
-#define LAUNCH(K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU, TRANSPOSE, \
-               GRID_DIM)                                                       \
+#define LAUNCH(K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,            \
+               FAST_SILU2, TRANSPOSE, GRID_DIM)                                \
   launch_nvfp4_dual_gemm<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,  \
-                         TRANSPOSE, GRID_DIM>(                                 \
+                         FAST_SILU2, TRANSPOSE, GRID_DIM>(                     \
       M, N, A_ptr, B1_ptr, B2_ptr, SFA_ptr, SFB1_ptr, SFB2_ptr, C_ptr)
 
 torch::Tensor
@@ -402,43 +371,43 @@ cuda_nvfp4_dual_gemm(const torch::Tensor &A, const torch::Tensor &B1,
 
   switch (hash(M, N, K)) {
   [[likely]] case hash(256, 4096, 7168):
-    LAUNCH(7168, 128, 64, 256, 5, true, false, 128);
+    LAUNCH(7168, 128, 64, 256, 5, true, false, false, 128);
     return C;
   [[likely]] case hash(512, 4096, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false, 128);
+    LAUNCH(7168, 128, 128, 256, 4, false, true, false, 128);
     return C;
   [[likely]] case hash(256, 3072, 4096):
-    LAUNCH(4096, 128, 64, 256, 5, true, false, 96);
+    LAUNCH(4096, 128, 64, 256, 5, true, false, false, 96);
     return C;
   [[likely]] case hash(512, 3072, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, true, true, 96);
+    LAUNCH(7168, 128, 128, 256, 4, true, false, true, 96);
     return C.view({N, M, 1}).transpose(0, 1);
   [[unlikely]] case hash(1536, 512, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false, 48);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, false, 48);
     return C;
   [[unlikely]] case hash(256, 512, 256):
-    LAUNCH(256, 128, 128, 256, 4, false, false, 8);
+    LAUNCH(256, 128, 128, 256, 4, false, false, false, 8);
     return C;
   [[unlikely]] case hash(3072, 1024, 1536):
-    LAUNCH(1536, 128, 128, 256, 4, false, false, 192);
+    LAUNCH(1536, 128, 128, 256, 4, false, false, false, 192);
     return C;
   [[unlikely]] case hash(7168, 1024, 256):
-    LAUNCH(256, 128, 128, 256, 4, false, false, 448);
+    LAUNCH(256, 128, 128, 256, 4, false, false, false, 448);
     return C;
   [[unlikely]] case hash(7168, 2304, 2048):
-    LAUNCH(2048, 128, 128, 256, 4, false, false, 1008);
+    LAUNCH(2048, 128, 128, 256, 4, false, false, false, 1008);
     return C;
   [[unlikely]] case hash(4608, 384, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false, 108);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, false, 108);
     return C;
   [[unlikely]] case hash(7168, 384, 2304):
-    LAUNCH(2304, 128, 128, 256, 4, false, false, 168);
+    LAUNCH(2304, 128, 128, 256, 4, false, false, false, 168);
     return C;
   [[unlikely]] case hash(512, 768, 7168):
-    LAUNCH(7168, 128, 128, 256, 4, false, false, 24);
+    LAUNCH(7168, 128, 128, 256, 4, false, false, false, 24);
     return C;
   [[unlikely]] case hash(4096, 768, 512):
-    LAUNCH(512, 128, 128, 256, 4, false, false, 192);
+    LAUNCH(512, 128, 128, 256, 4, false, false, false, 192);
     return C;
   [[unlikely]] default:
     return C;

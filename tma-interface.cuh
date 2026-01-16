@@ -49,6 +49,10 @@ __device__ static __forceinline__ void init_barrier(uint64_t *bar,
                : "memory");
 }
 
+__device__ static __forceinline__ void fence_barrier_init() {
+  asm volatile("fence.mbarrier_init.release.cluster;\n");
+}
+
 __device__ static __forceinline__ void arrive(uint64_t *bar, uint32_t count) {
   uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
   asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0],  %1;\n"
