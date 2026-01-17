@@ -42,8 +42,35 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
   return pred;
 }
 
+// LUT for GRID = 96
+__device__ __constant__ int8_t lut_96[148] = {
+    -1, -1, 48, 49, 50, 51, 52, 53, 54, 55, 0,  1,  2,  3,  4,  5,  6,  7,  56,
+    57, 58, 59, 60, 61, 62, 63, 8,  9,  10, 11, 12, 13, 14, 15, 64, 65, 66, 67,
+    68, 69, 70, 71, 16, 17, 18, 19, 20, 21, 22, 23, 72, 73, 74, 75, 76, 77, 78,
+    79, 24, 25, 26, 27, 28, 29, 30, 31, 80, 81, 82, 83, 84, 85, 86, 87, 32, 33,
+    34, 35, -1, -1, 88, 89, 90, 91, 92, 93, 94, 95, 36, 37, 38, 39, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, 40, 41, 42, 43, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, 44, 45, 46, 47, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+};
+
+// LUT for GRID = 128
+__device__ __constant__ int8_t lut_128[148] = {
+    0,  1,  64, 65,  66,  67,  68,  69,  70,  71,  2,   3,   4,   5,   6,
+    7,  8,  9,  72,  73,  74,  75,  76,  77,  78,  79,  10,  11,  12,  13,
+    14, 15, 16, 17,  80,  81,  82,  83,  84,  85,  86,  87,  18,  19,  20,
+    21, 22, 23, 24,  25,  88,  89,  90,  91,  92,  93,  94,  95,  26,  27,
+    28, 29, 30, 31,  32,  33,  96,  97,  98,  99,  100, 101, 102, 103, 34,
+    35, 36, 37, -1,  -1,  104, 105, 106, 107, 108, 109, 110, 111, 38,  39,
+    40, 41, -1, -1,  112, 113, 114, 115, 116, 117, 118, 119, 42,  43,  44,
+    45, -1, -1, 120, 121, 122, 123, 124, 125, 126, 127, 46,  47,  48,  49,
+    -1, -1, -1, -1,  -1,  -1,  -1,  -1,  -1,  -1,  50,  51,  52,  53,  54,
+    55, 56, 57, 58,  59,  60,  61,  62,  63,  -1,  -1,  -1,  -1,
+};
+
 template <int32_t K, int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K,
-          int32_t PIPE_DEPTH, bool FAST_SILU, bool FAST_SILU2, bool TRANSPOSE>
+          int32_t PIPE_DEPTH, bool FAST_SILU, bool FAST_SILU2, bool TRANSPOSE,
+          int32_t NUM_BLOCKS>
 __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
     nvfp4_dual_gemm_cutlass(int M, int N,
                             __grid_constant__ const CUtensorMap a_map,
@@ -163,6 +190,7 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
       tcgen05_dealloc(0, 512);
     }
   } else {
+    warpgroup_reg_alloc<256>();
     if (warp_id == 4 && elect_one_sync()) { // issue TMAs
       CachePolicy cache_policy_a = CachePolicy::EVICT_LAST;
       CachePolicy cache_policy_b = CachePolicy::EVICT_FIRST;
@@ -235,20 +263,14 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
         const int32_t phase = (k / PIPE_DEPTH) % 2;
 
         char *a_shr = shmem + pipe_idx * STAGE_BYTES;
-        char *b1_shr = a_shr + TILE_SIZE_A / 2;
-        char *b2_shr = b1_shr + TILE_SIZE_B / 2;
-        char *sfa_shr = b2_shr + TILE_SIZE_B / 2;
-        char *sfb1_shr = sfa_shr + TILE_SIZE_SFA;
-        char *sfb2_shr = sfb1_shr + TILE_SIZE_SFB;
+        char *sfa_shr = a_shr + (TILE_SIZE_A / 2) + TILE_SIZE_B;
 
         const uint64_t desc_a = make_smem_desc<SWIZZLE_128B>(a_shr, 1, 1024);
-        const uint64_t desc_b1 = make_smem_desc<SWIZZLE_128B>(b1_shr, 1, 1024);
-        const uint64_t desc_b2 = make_smem_desc<SWIZZLE_128B>(b2_shr, 1, 1024);
+        const uint64_t desc_b1 = desc_a + ((TILE_SIZE_A / 2) >> 4);
+        const uint64_t desc_b2 = desc_b1 + ((TILE_SIZE_B / 2) >> 4);
         const uint64_t desc_sfa = make_smem_desc<NO_SWIZZLE>(sfa_shr, 128, 128);
-        const uint64_t desc_sfb1 =
-            make_smem_desc<NO_SWIZZLE>(sfb1_shr, 128, 128);
-        const uint64_t desc_sfb2 =
-            make_smem_desc<NO_SWIZZLE>(sfb2_shr, 128, 128);
+        const uint64_t desc_sfb1 = desc_sfa + (TILE_SIZE_SFA >> 4);
+        const uint64_t desc_sfb2 = desc_sfb1 + (TILE_SIZE_SFB >> 4);
 
         wait(&tma_done[pipe_idx], phase);
 
@@ -329,14 +351,11 @@ void launch_nvfp4_dual_gemm(int M, int N, uint8_t *A_ptr, uint8_t *B1_ptr,
   static_assert(shmem_size <= 227 * 1024, "Shared memory size exceeds 227 KB");
   cudaFuncSetAttribute(
       nvfp4_dual_gemm_cutlass<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH,
-                              FAST_SILU, FAST_SILU2, TRANSPOSE>,
+                              FAST_SILU, FAST_SILU2, TRANSPOSE, GRID_DIM>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
 
-  // const int32_t num_rows = CEIL_DIV(M, BLOCK_M);
-  // const int32_t num_cols = CEIL_DIV(N, BLOCK_N);
-
   nvfp4_dual_gemm_cutlass<K, BLOCK_M, BLOCK_N, BLOCK_K, PIPE_DEPTH, FAST_SILU,
-                          FAST_SILU2, TRANSPOSE>
+                          FAST_SILU2, TRANSPOSE, GRID_DIM>
       <<<GRID_DIM, BLOCK_DIM, shmem_size>>>(M, N, tensorMapA, tensorMapB1,
                                             tensorMapB2, SFA_ptr, SFB1_ptr,
                                             SFB2_ptr, C_ptr);

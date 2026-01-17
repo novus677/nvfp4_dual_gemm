@@ -401,6 +401,6 @@ __device__ void tcgen05_mma(uint64_t desc_a, uint64_t desc_b, uint32_t tmem_d,
                "}\n"
                :
                : "r"(tmem_d), "l"(desc_a), "l"(desc_b), "r"(InstDesc),
-                 "r"(tmem_sfa), "r"(tmem_sfb), "n"(int32_t(ScaleD)),
+                 "r"(tmem_sfa), "r"(tmem_sfb), "n"(int32_t(EnableD)),
                  "C"(CollectorOp));
 }
