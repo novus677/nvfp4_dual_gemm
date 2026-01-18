@@ -1,4 +1,4 @@
-#!POPCORN leaderboard nvfp4_dual_gemm
+#!POPCORN leaderboard modal_nvfp4_dual_gemm
 
 import torch
 from task import input_t, output_t
@@ -729,6 +729,12 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
   return pred;
 }
 
+__device__ __forceinline__ void
+prefetch_tma_descriptor(CUtensorMap const *desc_ptr) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
+  asm volatile("prefetch.tensormap [%0];\n" ::"l"(gmem_int_desc) : "memory");
+}
+
 // LUT for GRID = 96
 __device__ __constant__ int8_t lut_96[148] = {
     -1, -1, 48, 49, 50, 51, 52, 53, 54, 55, 0,  1,  2,  3,  4,  5,  6,  7,  56,
@@ -763,13 +769,15 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
                             __grid_constant__ const CUtensorMap a_map,
                             __grid_constant__ const CUtensorMap b1_map,
                             __grid_constant__ const CUtensorMap b2_map,
-                            uint8_t *SFA_ptr, uint8_t *SFB1_ptr,
-                            uint8_t *SFB2_ptr, half *C_ptr) {
+                            const uint8_t *SFA_ptr, const uint8_t *SFB1_ptr,
+                            const uint8_t *SFB2_ptr, half *C_ptr) {
 
   extern __shared__ __align__(1024) char shmem[];
-  __shared__ __align__(8) uint64_t matmul_done[PIPE_DEPTH];
-  __shared__ __align__(8) uint64_t tma_done[PIPE_DEPTH];
-  __shared__ __align__(8) uint64_t final_matmul_done[1];
+  __shared__ __align__(8) uint64_t bars[2 * PIPE_DEPTH + 1];
+
+  uint64_t *tma_done = &bars[0];
+  uint64_t *matmul_done = &bars[PIPE_DEPTH];
+  uint64_t *final_matmul_done = &bars[2 * PIPE_DEPTH];
 
   constexpr int32_t TILE_SIZE_A = BLOCK_K * BLOCK_M;
   constexpr int32_t TILE_SIZE_B = BLOCK_K * BLOCK_N;
@@ -792,8 +800,8 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
 
   if (warp_id == 0 && elect_one_sync()) {
     for (int32_t i = 0; i < PIPE_DEPTH; i++) {
-      init_barrier(&matmul_done[i], 1);
       init_barrier(&tma_done[i], 1);
+      init_barrier(&matmul_done[i], 1);
     }
     init_barrier(&final_matmul_done[0], 1);
     fence_barrier_init();
@@ -814,23 +822,23 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
     wait(&final_matmul_done[0], 0);
 
     if constexpr (TRANSPOSE) {
-      float acc1[BLOCK_N / 4];
-      float acc2[BLOCK_N / 4];
+      float acc1[BLOCK_N / 8];
+      float acc2[BLOCK_N / 8];
 
       half *c_off = C_ptr + (outer_col * BLOCK_N) * M + (outer_row * BLOCK_M);
-      for (int32_t r = 0; r < 4; r++) {
+      for (int32_t r = 0; r < 8; r++) {
         if constexpr (BLOCK_N == 128) {
-          tcgen05_ld_32x32b_x32(tmem_d1 + r * (BLOCK_N / 4), acc1);
-          tcgen05_ld_32x32b_x32(tmem_d2 + r * (BLOCK_N / 4), acc2);
+          tcgen05_ld_32x32b_x16(tmem_d1 + r * (BLOCK_N / 8), acc1);
+          tcgen05_ld_32x32b_x16(tmem_d2 + r * (BLOCK_N / 8), acc2);
         } else if constexpr (BLOCK_N == 64) {
-          tcgen05_ld_32x32b_x16(tmem_d1 + r * (BLOCK_N / 4), acc1);
-          tcgen05_ld_32x32b_x16(tmem_d2 + r * (BLOCK_N / 4), acc2);
+          tcgen05_ld_32x32b_x8(tmem_d1 + r * (BLOCK_N / 8), acc1);
+          tcgen05_ld_32x32b_x8(tmem_d2 + r * (BLOCK_N / 8), acc2);
         }
         tcgen05_wait_ld();
 
-        for (int32_t i = 0; i < (BLOCK_N / 4); i++) {
+        for (int32_t i = 0; i < (BLOCK_N / 8); i++) {
           float val = silu_func(acc1[i]) * acc2[i];
-          __stwt(&c_off[(r * (BLOCK_N / 4) + i) * M + wg_lane_id],
+          __stwt(&c_off[(r * (BLOCK_N / 8) + i) * M + wg_lane_id],
                  __float2half_rn(val));
         }
       }
@@ -879,7 +887,7 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
   } else {
     warpgroup_reg_alloc<256>();
     if (warp_id == 4 && elect_one_sync()) { // issue TMAs
-      CachePolicy cache_policy_a = CachePolicy::EVICT_LAST;
+      CachePolicy cache_policy_a = CachePolicy::EVICT_NORMAL;
       CachePolicy cache_policy_b = CachePolicy::EVICT_FIRST;
 
       auto issue_tma = [&](int32_t k, int32_t pipe_idx) {
@@ -986,7 +994,9 @@ __global__ void __launch_bounds__(WARPGROUP_SIZE + 2 * WARP_SIZE, 1)
                 tmem_sfb2 + j * (TMEM_WIDTH_SFB / 4) + sfb_offset);
           }
         }
-        tcgen05_commit(&matmul_done[pipe_idx]);
+
+        if (k < (K / BLOCK_K) - PIPE_DEPTH)
+          tcgen05_commit(&matmul_done[pipe_idx]);
       }
       tcgen05_commit(&final_matmul_done[0]);
     }
@@ -997,8 +1007,9 @@ template <int32_t K, int32_t BLOCK_M, int32_t BLOCK_N, int32_t BLOCK_K,
           int32_t PIPE_DEPTH, bool FAST_SILU, bool FAST_SILU2, bool TRANSPOSE,
           int32_t GRID_DIM>
 void launch_nvfp4_dual_gemm(int M, int N, uint8_t *A_ptr, uint8_t *B1_ptr,
-                            uint8_t *B2_ptr, uint8_t *SFA_ptr,
-                            uint8_t *SFB1_ptr, uint8_t *SFB2_ptr, half *C_ptr) {
+                            uint8_t *B2_ptr, const uint8_t *SFA_ptr,
+                            const uint8_t *SFB1_ptr, const uint8_t *SFB2_ptr,
+                            half *C_ptr) {
 
   constexpr int32_t BLOCK_DIM = WARPGROUP_SIZE + 2 * WARP_SIZE;
 
@@ -1132,6 +1143,7 @@ my_module = load_inline(
         "--use_fast_math",
         "-gencode=arch=compute_100a,code=sm_100a",
         "--expt-relaxed-constexpr",
+        "--relocatable-device-code=false",
     ],
     extra_ldflags=["-lcuda", "-lcublas"],
     verbose=True,
